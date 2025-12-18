@@ -8,7 +8,56 @@ The find_matches function is provided for you — no need to change it!
 """
 
 import pandas as pd
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+
+def _parse_alleles(value: Any) -> Optional[List[float]]:
+    """Parse a locus value into a list of alleles.
+
+    Returns None for missing values.
+    """
+
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+    if not text or text == "-":
+        return None
+
+    alleles: List[float] = []
+    for allele in text.split(","):
+        allele = allele.strip()
+        if not allele:
+            continue
+        try:
+            alleles.append(float(allele))
+        except ValueError:
+            # Non-numeric microvariants are unlikely here; skip if unparseable
+            continue
+
+    return alleles or None
+
+
+def _evaluate_locus(query_alleles: Optional[List[float]], candidate_alleles: Optional[List[float]]):
+    """Classify a single locus comparison.
+
+    Returns tuple (consistent, mutated, inconclusive, mismatch_score)
+    where mismatch_score penalises hard mismatches when computing CLR-like value.
+    """
+
+    if query_alleles is None or candidate_alleles is None:
+        return 0, 0, 1, 0
+
+    shared = set(query_alleles).intersection(candidate_alleles)
+    if shared:
+        return 1, 0, 0, 0
+
+    # Allow a ±1 repeat mutation tolerance when alleles are numeric
+    mutated = any(abs(a - b) == 1 for a in query_alleles for b in candidate_alleles)
+    if mutated:
+        return 0, 1, 0, 0.5
+
+    return 0, 0, 0, 1  # hard mismatch
 
 
 def match_single(
@@ -35,35 +84,51 @@ def match_single(
             ...
         ]
     """
-    # TODO: Replace this dummy with your real matching logic!
-    # Example: return empty list (safe default)
-    return []
+    candidates: List[Dict[str, Any]] = []
+    query_id = query_profile["PersonID"]
 
-    # Helpful tip: you can compute a simple score like number of shared alleles
-    # Example skeleton:
-    """
-    candidates = []
-    query_id = query_profile['PersonID']
-    
+    # Pre-parse query alleles once
+    query_alleles_by_locus = {
+        locus: _parse_alleles(value)
+        for locus, value in query_profile.items()
+        if locus != "PersonID"
+    }
+
+    loci = [col for col in database_df.columns if col != "PersonID"]
+
     for _, candidate in database_df.iterrows():
-        if candidate['PersonID'] == query_id:
-            continue  # skip self
-        
-        score = your_scoring_function(query_profile, candidate)
-        if score > threshold:
-            candidates.append({
-                "person_id": candidate['PersonID'],
+        if candidate["PersonID"] == query_id:
+            continue  # skip self comparisons
+
+        consistent = mutated = inconclusive = 0
+        mismatch_penalty = 0.0
+
+        for locus in loci:
+            q_alleles = query_alleles_by_locus.get(locus)
+            c_alleles = _parse_alleles(candidate[locus])
+            c, m, inc, penalty = _evaluate_locus(q_alleles, c_alleles)
+            consistent += c
+            mutated += m
+            inconclusive += inc
+            mismatch_penalty += penalty
+
+        # Simple CLR-like score favouring consistent loci and tolerating limited mutations
+        score = max(consistent * 2 + mutated - mismatch_penalty, 0.0) + 1e-6
+        posterior = score / (score + 1)  # assume flat prior of 0.5
+
+        candidates.append(
+            {
+                "person_id": candidate["PersonID"],
                 "clr": score,
-                "posterior": 0.99,  # optional
-                "consistent_loci": 18,
-                "mutated_loci": 0,
-                "inconclusive_loci": 3
-            })
-    
-    # Sort by CLR descending and take top 10
-    candidates.sort(key=lambda x: x['clr'], reverse=True)
+                "posterior": posterior,
+                "consistent_loci": consistent,
+                "mutated_loci": mutated,
+                "inconclusive_loci": inconclusive,
+            }
+        )
+
+    candidates.sort(key=lambda x: x["clr"], reverse=True)
     return candidates[:10]
-    """
 
 
 # ============================================================
